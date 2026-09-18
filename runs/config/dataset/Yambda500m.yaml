@@ -1,0 +1,26 @@
+# Yambda500m (listens) — canonical dataset config for the SID scaling study.
+#
+# `name` is the PREPROCESSED dataset, produced by sh/prepare_Yambda.sh from raw
+# `Yambda500m_listens`:
+#   filtering : played_ratio_pct >= 50, then item_min_count=20, user_min_count=5
+#               (u5_i20), N-core, dedup
+#   split     : global temporal (gts_1d), val_type=by_time,
+#               test = last 1 day, validation = preceding 1 day, train = the rest.
+# The `_scaling` suffix keeps the study off the shared preprocessed/ and split/ data.
+# The preprocess step reads the raw data, so it passes `dataset.name=Yambda500m_listens`.
+#
+# Columns and normalized_embed follow semantic-ids
+# `runs/config/dataset/Yambda500m_listens.yaml`, in the inline schema the
+# collision/scaling toolchain uses.
+name: Yambda500m_listens_u5_i20_scaling
+seq_length_items: 64          # matched to Yambda50m for a clean 50m -> 500m ladder
+filter_seen: False
+column_name:
+  user_col: uid
+  item_col: item_id
+  time_col: timestamp         # uint32 SECONDS for Yambda (86400 = 1 day) — see project CLAUDE.md
+  relevance_col: played_ratio_pct
+
+data_format: parquet
+meta_embed_col: normalized_embed
+relevance_col:

@@ -1,0 +1,16 @@
+defaults:
+  - _self_
+  - /dataset: Beauty2014
+
+name: ???
+split_name: ???
+
+model_name: sentence-transformers/all-MiniLM-L6-v2
+batch_size: 1024
+cuda_visible_devices: 2
+tag: #
+
+# If set , prepended to each text before encode. If omitted or null, uses
+# built-in defaults per model in runs/build_semantic_embeddings.py (MODEL_PREFIXES).
+# Use "" to disable prefix for a model that otherwise has a default.
+# text_prefix: "query: "

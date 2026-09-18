@@ -1,0 +1,9 @@
+train_dataset:
+  _target_: src.datasets.causal_lm.CausalLMDataset
+  # The source dataset reads max_length + 1 events, then shifts its labels.
+  max_length: ${sub:${dataset.seq_length_items},1}
+  random_slice: false
+
+predict_dataset:
+  _target_: src.datasets.causal_lm.CausalLMPredictionDataset
+  max_length: ${..train_dataset.max_length}

@@ -1,0 +1,23 @@
+# core
+numpy
+pandas
+pytorch_lightning
+torch
+replay-rec
+transformers>=4.42
+sentence_transformers
+polars
+datasets
+
+# experimentation
+tqdm
+clearml
+omegaconf
+tensorboard
+hydra-core
+
+# visualization
+matplotlib
+
+# vector quantization
+faiss-cpu

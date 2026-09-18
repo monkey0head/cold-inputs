@@ -1,0 +1,26 @@
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# experiment outputs (results live on the ClearML server)
+checkpoints/
+model_checkpoints/
+lightning_logs/
+outputs/
+multirun/
+
+# caches
+.pytest_cache/
+.ruff_cache/
+
+# data lives in SEQ_REC_DATA_PATH (external, shared), never in the repo
+data/
+# DiskTracker run directories (metrics, tables, figures per run)
+claude_disk_runs/
+
+# Local baseline validation data, caches, and outputs
+codex_validation/
+# Per-epoch CSV logs
+csvlogs/

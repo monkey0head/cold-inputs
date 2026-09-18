@@ -1,0 +1,18 @@
+# Prepared for the SID scaling study by sh/prepare_Amazon.sh: `name` is the
+# PREPROCESSED dataset (5-core, dedup, global temporal split at the 0.9 quantile,
+# val-by-time). The preprocess step reads the raw data, so it passes
+# `dataset.name=Beauty2023`.
+name: Beauty2023_scaling
+seq_length_items: 16  # items of user history kept per training sequence
+filter_seen: False
+column_name:  
+  user_col: user_id
+  item_col: asin
+  time_col: timestamp
+  relevance_col: rating
+
+data_format: parquet
+meta_columns_to_embed: ["title", "description", "categories"]
+categories_column: categories
+min_category_level: 2
+max_category_level: 4

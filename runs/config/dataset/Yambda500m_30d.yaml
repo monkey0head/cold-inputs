@@ -1,0 +1,26 @@
+# Yambda500m (listens), last 30 days — canonical dataset config for the SID scaling study.
+#
+# `name` is the PREPROCESSED dataset, produced by sh/prepare_Yambda_30d.sh from raw
+# `Yambda500m_listens`:
+#   crop      : last 30 days of interactions, applied BEFORE every other filter, so
+#               item_min_count and user_min_count count inside the window
+#   filtering : played_ratio_pct >= 50, then item_min_count=20, user_min_count=5
+#               (u5_i20), N-core, dedup
+#   split     : global temporal (gts_1d), val_type=by_time,
+#               test = last 1 day, validation = preceding 1 day, train = the rest.
+# The crop keeps the tail, so max_timestamp is unchanged at 26000000 and the absolute
+# gts_1d thresholds give this set the same test day as Yambda50m and Yambda500m.
+#
+# Columns and normalized_embed follow `Yambda500m.yaml`; only `name` differs.
+name: Yambda500m_listens_30d_u5_i20_scaling
+seq_length_items: 64          # matched to Yambda50m for a clean 50m -> 500m ladder
+filter_seen: False
+column_name:
+  user_col: uid
+  item_col: item_id
+  time_col: timestamp         # uint32 SECONDS for Yambda (86400 = 1 day) — see project CLAUDE.md
+  relevance_col: played_ratio_pct
+
+data_format: parquet
+meta_embed_col: normalized_embed
+relevance_col:

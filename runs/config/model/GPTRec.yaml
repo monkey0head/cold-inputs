@@ -1,0 +1,19 @@
+specification:
+  _target_: src.models.GPTRec
+
+  gpt_config:
+    vocab_size: 2
+    n_positions: ${dataset_params.train_dataset.max_length}
+    n_embd: 128
+    n_layer: 3
+    n_head: 2
+    resid_pdrop: 0.3
+    embd_pdrop: 0.3
+    attn_pdrop: 0.3
+    attn_implementation: sdpa  # works with transformers>=4.42
+
+  add_head: True
+  tie_weights: True
+
+vocab_size_field: vocab_size
+left_padding: False

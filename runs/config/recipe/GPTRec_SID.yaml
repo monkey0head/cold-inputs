@@ -1,0 +1,44 @@
+# @package _global_
+#
+# GPTRec + semantic-ID *model* recipe. The single owner of everything model-related:
+# it SELECTS the model config groups (model, seqrec_module, dataset_params) and sets
+# their values — architecture, the Lightning module, the optimization shape
+# (optimizer / lr / scheduler / warmup), the SID-token dataset shaping, and a short
+# `model_tag` for the run name.
+#
+# The pipeline (quantize_and_train.yaml) owns everything else, including the whole
+# trainer/callbacks (max_epochs, gradient_clip_val, early stopping) and the
+# `num_tokens_per_item` value + derived `quantizer.num_codebooks`. This recipe is
+# required (it provides the model and `model_tag`); it is the default recipe there.
+# Sweep axes (collision_solver, extend_codebook, num_tokens_per_item, random_state)
+# come from the CLI.
+defaults:
+  - /dataset_params: CausalLMDatasetSIDShift
+  - /model: GPTRec
+  - /seqrec_module: SeqRecSIDGPTRec
+  - override /seqrec_module/optimizer: adamw
+  - override /seqrec_module/lr_scheduler: cosine_with_warmup
+
+dataset_params:
+  train_dataset:
+    shift: 0
+    # Token sequence length = items in history * SID tokens per item.
+    max_length: ${prod:[${dataset.seq_length_items}, ${num_tokens_per_item}]}
+  predict_dataset:
+    shift: 0
+    max_length: ${prod:[${sub:${dataset.seq_length_items}, 1}, ${num_tokens_per_item}]}
+
+model:
+  specification:
+    gpt_config:
+      n_embd: 512
+      n_layer: 8
+      n_head: 8
+
+seqrec_module:
+  num_codebooks: ${num_tokens_per_item}
+
+# Model-arch fragment for the run name; assembled into task_name by the
+# experiment_tracker in quantize_and_train.yaml. A different model recipe sets its own.
+_gpt: ${model.specification.gpt_config}
+model_tag: GPT_${_gpt.n_embd}_${_gpt.n_layer}_${_gpt.n_head}

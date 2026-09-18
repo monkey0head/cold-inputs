@@ -1,0 +1,10 @@
+# Metric-driven schedule: halve the learning rate whenever val_ndcg stalls.
+# `patience` must stay below early_stopping.patience (20), or the run ends before the
+# rate is ever reduced. `min_lr_ratio` is relative to the starting lr, so it follows a
+# swept peak instead of being pinned to an absolute floor.
+_target_: src.lr_schedulers.ReduceOnPlateau
+monitor: ${early_stopping.monitor}
+mode: ${early_stopping.mode}
+factor: 0.5
+patience: 5
+min_lr_ratio: 0.01

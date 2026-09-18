@@ -1,0 +1,204 @@
+cuda_visible_devices: ${oc.env:CUDA_VISIBLE_DEVICES,0}
+random_state: 17
+
+# === CONFIG COMPOSITION / RESOLUTION ORDER ===
+# Single ownership, no duplication:
+#   * THIS file (quantize_and_train.yaml) = the pipeline/experiment. Owns the data,
+#     split, quantization + collision solving, dataloader, the WHOLE trainer and
+#     callbacks (max_epochs, gradient_clip_val, early stopping, checkpointing),
+#     evaluation, logging, and `num_tokens_per_item` + derived `quantizer.num_codebooks`.
+#   * recipe/<model>.yaml = the recommender. It SELECTS the model config groups
+#     (model, seqrec_module, dataset_params) and sets `model_tag`. Item-ID recipes
+#     also disable quantization and supply tracker names without quantizer fields.
+#     A recipe is REQUIRED (it provides the model); GPTRec_SID is the default below.
+#
+# Hydra composes in defaults-list order: pipeline groups first, then `_self_` (this
+# file, so it overrides group defaults — e.g. `quantizer.num_codebooks` wins over the
+# faiss default), then `recipe` LAST (it pulls in the model groups after this file).
+# The selected recipe overrides pipeline defaults for its model. The experiment
+# tracker logs the fully resolved config.
+defaults:
+  - dataset: Beauty2014
+  - quantizer: faiss_rqkmeans
+  - experiment_tracker: disk
+  - _self_               # after the pipeline groups -> this file overrides their defaults
+  - recipe: GPTRec_SID   # LAST, required -> selects & configures the recommender
+
+# Number of SID tokens per item that the GenRec model consumes (source of truth for
+# the SID token layout). Swept per experiment on the CLI (e.g. num_tokens_per_item=3,4).
+num_tokens_per_item: 4
+
+# Sequential collision assignment appends one token to the quantized prefix.
+quantizer:
+  num_codebooks: ${sub:${num_tokens_per_item},1}
+
+split_name: gts_q09_val_by_time
+
+optimize_metric: val_NDCG@10
+
+item_id_offset:
+
+dataloader:
+  batch_size: 128
+  test_batch_size: 128
+  num_workers: 8
+  validation_size: 20000
+
+calc_val_metrics: True
+calc_test_metrics: True
+# Stop after quantization and SID evaluation, before any training. Used to measure
+# the SID space of a dataset, which does not depend on the model.
+quantization_only: False
+
+evaluator:
+  metrics: ['NDCG', 'HitRate', 'Coverage', 'Surprisal']
+  top_k: [1, 10, 100]
+  polars_metrics: True
+
+retrain_with_validation: False # not implemented
+save_val_predictions: False # save per-user validation recommendations as an artifact
+save_test_predictions: False # save per-user test recommendations as an artifact
+
+# Path to a checkpoint to evaluate instead of training. When set, fitting is skipped and the
+# module is rebuilt from it; enabled quantization, data stats and evaluation run as usual.
+# Pass the original run's model and data overrides, including quantization for SID recipes.
+eval_checkpoint: null
+
+# Keep only the last N days of train, dropping users left with nothing. Validation, test and
+# the item catalog are unchanged, so the semantic IDs are identical whatever this is set to.
+# Fewer users means fewer steps per epoch, so rescale `warmup_steps` when setting it.
+train_last_days: null
+
+# === PERFORMANCE ===
+compile: True
+
+# === CHECKPOINTS ===
+checkpoint_dir: ${oc.env:CHECKPOINT_DIR, ${hydra:runtime.cwd}/checkpoints}
+
+# Where the per-epoch validation curve goes: one directory per run under this root, holding
+# `lightning_logs/version_<n>/metrics.csv`. Point a sweep at its own root the way
+# `checkpoint_dir` is pointed. The curve cannot be rebuilt after a run finishes, and without
+# it a run cannot be checked for convergence, so it is written for every run.
+csvlog_root: ${oc.env:CSVLOG_DIR, ${hydra:runtime.cwd}/csvlogs}
+
+# === CALLBACKS AND TRAINER ===
+device_stats_monitor:
+  _target_: pytorch_lightning.callbacks.DeviceStatsMonitor
+
+early_stopping:
+  _target_: pytorch_lightning.callbacks.EarlyStopping
+  monitor: val_ndcg
+  patience: 20
+  mode: max
+
+learning_rate_monitor:
+  _target_: pytorch_lightning.callbacks.LearningRateMonitor
+
+model_checkpoint:
+  _target_: pytorch_lightning.callbacks.ModelCheckpoint
+  monitor: ${early_stopping.monitor}
+  mode: ${early_stopping.mode}
+  save_top_k: 1
+  save_weights_only: true
+
+model_summary:
+  _target_: pytorch_lightning.callbacks.ModelSummary
+  max_depth: 4
+
+tqdm_progress_bar:
+  _target_: pytorch_lightning.callbacks.TQDMProgressBar
+  refresh_rate: 10
+
+log_grad_norm:
+  _target_: src.callbacks.LogGradNormCallback
+  log_every_n_steps: 30
+  norm_type: 2.0
+  log_per_layer: False
+  include_patterns: [] # e.g. ['weight', 'attn']
+  exclude_patterns: ['bias'] # e.g. ['bias']
+
+log_ln_gain:
+  _target_: src.callbacks.LogLayerNormGainCallback
+  log_every_n_steps: 30
+  norm_type: 2.0
+  log_per_layer: True
+
+callbacks:
+    - ${early_stopping}
+    - ${learning_rate_monitor}
+    - ${model_summary}
+    - ${tqdm_progress_bar}
+    - ${log_grad_norm}
+    - ${log_ln_gain}
+
+trainer:
+  _target_: pytorch_lightning.Trainer
+  accelerator: gpu
+  devices: [0]
+  precision: bf16-mixed
+  max_epochs: 3
+  gradient_clip_val: 0.5
+  logger:
+    _target_: pytorch_lightning.loggers.CSVLogger
+    save_dir: ${csvlog_root}/${run_tag}_s${random_state}
+    flush_logs_every_n_steps: 20
+
+
+# === QUANTIZATION ===
+quantization:
+  # Item-ID recipes disable this stage; SID recipes require it.
+  enabled: true
+  embs_name: all-MiniLM-L6-v2
+
+  base_path: ${oc.env:SEQ_REC_DATA_PATH}/split/${dataset.name}/${split_name}
+  embs_path: ${quantization.base_path}/embs/${quantization.embs_name}
+  # Path to the meta-table holding ground-truth categories (used only when
+  # ``dataset.categories_column`` is set — otherwise category metrics are skipped).
+  meta_path: ${oc.env:SEQ_REC_DATA_PATH}/preprocessed/${dataset.name}/${dataset.name}_meta.parquet
+
+  collision_codebook_size: ${quantizer.codebook_size}
+  # Sequential assignment appends codes 0, 1, 2, ... within each prefix.
+  collision_solver: sequential
+  # Keep the inherited overflow policy and effective collision vocabulary size.
+  extend_codebook: global
+
+  crop_embeddings_to_num_items: true
+
+  evaluator:
+    log_to_console: true
+    log_to_experiment: true
+    compute_entropy: true
+    compute_distances: true
+    compute_normalized_distances: false
+    compute_knn_metrics: true
+    knn_kwargs:
+      k: [10, 100]
+      num_query_samples: 10000
+      metric: l2
+    compute_prefix_purity: true
+    compute_prefix_clustering: true
+    plot_figures: true
+
+# === LOGGING / EXPERIMENT TRACKER (pipeline-owned) ===
+# The tracker itself is a config group: `experiment_tracker=disk` (default, writes run
+# directories under a local root) or `experiment_tracker=clearml`. Both build their run
+# name from the pipeline fields below plus the `${model_tag}` fragment supplied by the
+# selected model recipe (every recipe must define it).
+# Free-text suffix appended to the ClearML task name, e.g. task_postfix=rerun.
+task_postfix: ""
+# Short label for the run's arm in a comparison, e.g. run_tag=plateau. Goes into the
+# DiskTracker directory name so sibling runs of one sweep are told apart by name.
+run_tag: base
+
+# Tracker fields shared by both backends. Recipes can describe their own model
+# without changing the tracker interface or the SID naming convention.
+tracking:
+  experiment_name: ${dataset.name}_${quantization.collision_solver}_${quantization.extend_codebook}_nc${num_tokens_per_item}_k${quantizer.codebook_size}_ccs${quantization.collision_codebook_size}_${model_tag}_${run_tag}_s${random_state}
+  task_name: >-
+    ${hydra:runtime.choices.quantizer}_nc${num_tokens_per_item}_k${quantizer.codebook_size}
+    ${model_tag}
+    solver_${quantization.collision_solver}_${quantization.extend_codebook} ${task_postfix}
+  tags:
+    - ${hydra:runtime.choices.quantizer}
+    - ${dataset.name}
+    - ${quantization.collision_solver}

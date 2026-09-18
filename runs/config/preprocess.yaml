@@ -1,0 +1,17 @@
+defaults:
+  - _self_
+  - dataset: Beauty2014
+
+engine: polars
+
+preprocessing_params:
+  n_core_filtering: True  # whether to apply N-core filtering 
+  # NOTE: if `n_core_filtering` is True removes consecutive duplicates on every step
+  rm_consecutive_dups: True  # whether to remove consecutive duplicates
+  item_min_count: 5
+  user_min_count: 5
+  min_relevance:  # if provided, used to filter out low-relevance interactions from data
+  num_users:  # if provided, used to subsample users from data
+  last_n_days:  # if provided, keeps only the last N days of data, before every other filter
+
+suffix:

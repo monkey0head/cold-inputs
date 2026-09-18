@@ -1,0 +1,6 @@
+_target_: src.preprocess.splits.LeaveOneOutSplitter
+
+# cold filtering happens inside the splitter, on separated input/target
+remove_cold_items: true   # drop validation/test items absent from train
+remove_cold_users: false  # drop validation/test users absent from train
+

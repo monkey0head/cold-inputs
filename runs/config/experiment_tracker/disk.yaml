@@ -1,0 +1,17 @@
+# Local on-disk tracker: one directory per run under `root_dir`, holding meta.json,
+# config.json, scalars.jsonl, tables/, figures/ and artifacts/. No server needed.
+#
+# `experiment_name` is the directory stem; DiskTracker appends a UTC timestamp, so
+# repeated runs of the same configuration never overwrite each other. Keep it on one
+# line: the stem is a directory name and folded YAML would splice in spaces.
+#
+# Point a sweep at its own root to keep its runs separable for aggregation:
+#   experiment_tracker.root_dir=<path>
+#
+# Every axis that a sweep varies belongs in the stem, otherwise two runs differing only
+# in model size or collision codebook size are told apart by their timestamp alone.
+# The selected recipe supplies `tracking.experiment_name`; its model tag follows
+# CLI overrides of the model dimensions.
+_target_: src.trackers.DiskTracker
+root_dir: ${hydra:runtime.cwd}/claude_disk_runs
+experiment_name: ${tracking.experiment_name}

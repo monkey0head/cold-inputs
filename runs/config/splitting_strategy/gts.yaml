@@ -1,0 +1,17 @@
+  _target_: src.preprocess.splits.GlobalTimeSplitter
+
+  # - float in [0, 1]: quantile of timestamp on the dataframe
+  # - int or datetime: absolute cutoff; rows with timestamp <= threshold stay on the train (earlier) side.
+  # - str: parsed with time_format (required), e.g. "%Y-%m-%d"; then behaves like datetime.
+  time_threshold: 0.9
+  time_format:  # pass only when `time_threshold` is string
+
+  val_type: by_time  # options: 'by_user', 'by_time', and 'last_train_item'
+  val_num_users: 5000  # pass only when `val_type` is 'by_user', if float then must be in [0, 1] (fraction)
+  val_time_threshold: 0.9  # pass only when `val_type` is 'by_time' (see `time_threshold` for interpretation details)
+
+  # cold filtering happens inside the splitter, on separated input/target
+  remove_cold_items: true   # drop validation/test items absent from train
+  remove_cold_users: false  # drop validation/test users absent from train
+
+  random_state: 42

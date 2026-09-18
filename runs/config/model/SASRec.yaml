@@ -1,0 +1,12 @@
+specification:
+  _target_: src.models.sasrec.SASRec
+  maxlen: ${dataset_params.train_dataset.max_length}
+  hidden_units: 128
+  num_blocks: 3
+  num_heads: 2
+  dropout_rate: 0.3
+
+# SASRec adds its padding row internally; item_num is the largest item ID.
+vocab_size_field: item_num
+vocab_size_offset: 0
+left_padding: false

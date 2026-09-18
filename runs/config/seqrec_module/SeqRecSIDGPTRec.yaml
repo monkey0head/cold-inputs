@@ -1,0 +1,9 @@
+defaults:
+  - optimizer: null
+  - lr_scheduler: null
+
+_target_: src.modules.semantic.seqrec_gptrec.SeqRecSIDGPTRec
+lr: 0.001 #0.0003
+num_codebooks: 4
+beam_size: 10
+codebook_sizes: null # rewrite in CLI: 'seqrec_module.codebook_sizes=[512, 512, 512, 512]'

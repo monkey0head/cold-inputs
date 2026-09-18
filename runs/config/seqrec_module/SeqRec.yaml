@@ -1,0 +1,8 @@
+defaults:
+  - optimizer: null
+  - lr_scheduler: null
+
+_target_: src.modules.id_based.SeqRec
+lr: 0.001
+predict_top_k: 10
+filter_seen: ${dataset.filter_seen}

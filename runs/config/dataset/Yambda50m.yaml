@@ -1,0 +1,28 @@
+# Yambda50m (listens) — canonical dataset config for the SID scaling study.
+#
+# `name` is the PREPROCESSED dataset, produced by sh/prepare_Yambda.sh from raw
+# `Yambda50m_listens`:
+#   filtering : played_ratio_pct >= 50, then item_min_count=20, user_min_count=5
+#               (u5_i20), N-core, dedup
+#   split     : global temporal (gts_1d), val_type=by_time,
+#               test = last 1 day, validation = preceding 1 day, train = the rest.
+# The `_scaling` suffix keeps the study off the shared preprocessed/ and split/ data.
+# The preprocess step reads the raw data, so it passes `dataset.name=Yambda50m_listens`.
+#
+# NOTE (assumption, flagged): meta_embed_col set to `normalized_embed` so the
+# 50m/500m pair forms a consistent scaling ladder (Yambda500m only ships
+# `normalized_embed`). The FROZEN collision-analysis Yambda50m used raw `embed`
+# with name `Yambda50m`; this config intentionally differs — re-SID + re-run needed
+# if we want the scaling ladder rather than exact reproduction of the frozen table.
+name: Yambda50m_listens_u5_i20_scaling
+seq_length_items: 64          # last-N items kept per training sequence (random_slice regime lives in dataset_params)
+filter_seen: False
+column_name:
+  user_col: uid
+  item_col: item_id
+  time_col: timestamp         # uint32 SECONDS for Yambda (86400 = 1 day) — see project CLAUDE.md
+  relevance_col: played_ratio_pct
+
+data_format: parquet
+meta_embed_col: normalized_embed
+relevance_col:

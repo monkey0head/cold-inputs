@@ -1,0 +1,3 @@
+_target_: src.lr_schedulers.CosineWithWarmup
+warmup_steps: 5000
+min_lr_ratio: 0.1

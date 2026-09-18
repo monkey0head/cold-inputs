@@ -1,0 +1,4 @@
+_target_: src.semantic_ids.faiss_rqkmeans.FaissRQKMeans
+
+num_codebooks: 3
+codebook_size: 256

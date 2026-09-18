@@ -1,0 +1,19 @@
+# @package _global_
+# Full-softmax SASRec with ordinary item IDs.
+defaults:
+  - /dataset_params: CausalLMDataset
+  - /model: SASRec
+  - /seqrec_module: SeqRec
+  - override /seqrec_module/optimizer: adamw
+  - override /seqrec_module/lr_scheduler: cosine_with_warmup
+
+quantization:
+  enabled: false
+
+model_tag: SASRec_${model.specification.hidden_units}_${model.specification.num_blocks}_${model.specification.num_heads}
+tracking:
+  experiment_name: ${dataset.name}_${model_tag}_${run_tag}_s${random_state}
+  task_name: ${model_tag} ${run_tag}_s${random_state} ${task_postfix}
+  tags:
+    - SASRec
+    - ${dataset.name}

@@ -1,0 +1,10 @@
+train_dataset:
+  _target_: src.datasets.semantic_shift.CausalLMDatasetSIDShift
+  max_length: 256
+  shift: 0
+  random_slice: False
+
+predict_dataset:
+  _target_: src.datasets.semantic_shift.CausalLMPredictionDatasetSIDShift
+  max_length: ${..train_dataset.max_length}
+  shift: 0

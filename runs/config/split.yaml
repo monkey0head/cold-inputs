@@ -1,0 +1,8 @@
+defaults:
+  - _self_
+  - /dataset: Beauty2014
+  - splitting_strategy: gts # gts, loo
+
+split_name: gts_q09_val_by_time
+
+# cold filtering is configured per splitting strategy (remove_cold_items / remove_cold_users)

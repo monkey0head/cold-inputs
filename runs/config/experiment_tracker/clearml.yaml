@@ -1,0 +1,6 @@
+# ClearML tracker: metrics, tables and figures live on the ClearML server, nothing
+# useful is left on disk. Needs credentials in ~/clearml.conf.
+_target_: src.trackers.ClearmlTracker
+project_name: av_collision_solvers_comparison/${dataset.name}
+task_name: ${tracking.task_name}
+tags: ${tracking.tags}
