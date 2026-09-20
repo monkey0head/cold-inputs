@@ -54,8 +54,9 @@ def main(config: DictConfig) -> None:
     metadata, item_mapping = encode(metadata, col="item_id", mapping=item_mapping, expand_mapping=True)
 
     split_stats = {}
+    timestamp_unit = OmegaConf.select(config, "dataset.timestamp_unit", default="s")
     for dataset in split:
-        split_stats[dataset]= dataset_stats(split[dataset], extended=True)
+        split_stats[dataset] = dataset_stats(split[dataset], extended=True, timestamp_unit=timestamp_unit)
         print(f"{dataset} statistics")
         print(split_stats[dataset])
 

@@ -5,6 +5,9 @@ import pandas as pd
 import polars as pl
 
 
+TIMESTAMP_UNITS_PER_DAY = {"s": 86400, "ms": 86400000}
+
+
 def calculate_sequence_stats(lengths, prefix=''):
     """
     prefix: prefix for statistic names (e.g., 'input_' or 'gt_')
@@ -26,14 +29,36 @@ def dataset_stats(
     user_id: str = "user_id",
     item_id: str = "item_id",
     timestamp: str = "timestamp",
+    timestamp_unit: str = "s",
 ) -> dict:
+    """Dataset counts and optional sequence/item-frequency statistics.
 
+    If the timestamp column is present, ties count rows beyond the first per
+    user/time. Extended distributions give exact event counts and their numbers
+    of users or items.
+    Day ranges use ``timestamp_unit`` (s or ms); timestamp bounds stay unchanged.
+    Both engines return the same keys and JSON-compatible values.
+    """
     if isinstance(data, pd.DataFrame):
-        return _pandas_dataset_stats(data, extended, user_id, item_id, timestamp)
+        stats = _pandas_dataset_stats(data, extended, user_id, item_id, timestamp)
     elif isinstance(data, pl.DataFrame):
-        return _polars_dataset_stats(data, extended, user_id, item_id, timestamp)
+        stats = _polars_dataset_stats(data, extended, user_id, item_id, timestamp)
     else:
         raise TypeError
+
+    for key, value in stats.items():
+        if isinstance(value, list):
+            continue
+        if pd.isna(value):
+            stats[key] = None
+        elif hasattr(value, "item"):
+            stats[key] = value.item()
+    if extended:
+        stats["timestamp_range_in_days"] = (
+            (stats["max_timestamp"] - stats["min_timestamp"]) / TIMESTAMP_UNITS_PER_DAY[timestamp_unit]
+            if stats["n_interactions"] else None
+        )
+    return stats
 
 
 def _pandas_dataset_stats(
@@ -57,40 +82,64 @@ def _pandas_dataset_stats(
         "n_users": n_users,
         "n_items": n_items,
         "n_interactions": n_interactions,
-        "density": n_interactions / (n_users * n_items),
+        "density": n_interactions / (n_users * n_items) if n_users and n_items else None,
         "avg_seq_length": seq_lengths.mean(),
     }
+    if timestamp in data.columns and extended:
+        stats.update({
+            "max_timestamp": data[timestamp].max(),
+            "min_timestamp": data[timestamp].min(),
+            "n_timestamp_ties": data.duplicated([user_id, timestamp]).sum(),
+        })
 
     if extended:
-        stats.update(calculate_sequence_stats(seq_lengths, prefix='seq_len_'))
-
         item_counts = data[item_id].value_counts()
-        stats.update(calculate_sequence_stats(item_counts, prefix='item_occurrence_'))
-
-        user_counts = data[user_id].value_counts()
-        stats.update(calculate_sequence_stats(user_counts, prefix='seq_len_'))
-
-        # Temporal statistics
-        stats["max_timestamp"] = data[timestamp].max()
-        stats["min_timestamp"] = data[timestamp].min()
-        stats["timestamp_range_in_days"] = (stats["max_timestamp"] - stats["min_timestamp"]) / (60 * 60 * 24)
+        for counts, prefix, population in (
+            (seq_lengths, "seq_len_", "n_users"),
+            (item_counts, "item_occurrence_", "n_items"),
+        ):
+            stats.update(calculate_sequence_stats(counts, prefix))
+            stats[prefix + "distribution"] = (
+                counts.value_counts().sort_index().rename_axis("event_count")
+                .reset_index(name=population).to_dict("records")
+            )
     return stats
 
 
 def _polars_dataset_stats(
     data: pl.DataFrame,
-    extended: bool = False,  # ignored
+    extended: bool = False,
     user_id: str = "user_id",
     item_id: str = "item_id",
-    timestamp: str = "timestamp",  # ignored
+    timestamp: str = "timestamp",
 ) -> dict:
 
-    return data.select(
-        pl.len().alias("Num. Events"),
-        pl.col(user_id).n_unique().alias("Num. Users"),
-        pl.col(item_id).n_unique().alias("Num. Items"),
-        (pl.len() / pl.col(user_id).n_unique()).alias("Avg. Length"),
+    stats = data.select(
+        pl.len().alias("n_interactions"),
+        pl.col(user_id).n_unique().alias("n_users"),
+        pl.col(item_id).n_unique().alias("n_items"),
+        (pl.len() / (pl.col(user_id).n_unique().cast(pl.UInt64) * pl.col(item_id).n_unique())).alias("density"),
+        (pl.len() / pl.col(user_id).n_unique()).alias("avg_seq_length"),
     ).to_dicts()[0]
+    if timestamp in data.columns and extended:
+        stats.update(data.select(
+            pl.col(timestamp).max().alias("max_timestamp"),
+            pl.col(timestamp).min().alias("min_timestamp"),
+            (pl.len() - pl.struct(user_id, timestamp).n_unique()).alias("n_timestamp_ties"),
+        ).to_dicts()[0])
+    
+    if extended:
+        for col, prefix, population in (
+            (user_id, "seq_len_", "n_users"),
+            (item_id, "item_occurrence_", "n_items"),
+        ):
+            counts = data.group_by(col).len(name="event_count")
+            stats.update(calculate_sequence_stats(counts["event_count"], prefix))
+            stats[prefix + "distribution"] = (
+                counts.group_by("event_count").len(name=population)
+                .sort("event_count").to_dicts()
+            )
+    return stats
 
 
 # === SET DEFAULT COLUMN NAMES ===

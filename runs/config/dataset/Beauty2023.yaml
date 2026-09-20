@@ -12,6 +12,7 @@ column_name:
   relevance_col: rating
 
 data_format: parquet
+timestamp_unit: ms
 meta_columns_to_embed: ["title", "description", "categories"]
 categories_column: categories
 min_category_level: 2

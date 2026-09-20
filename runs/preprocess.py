@@ -11,9 +11,13 @@ import pandas as pd
 import polars as pl
 from omegaconf import DictConfig, OmegaConf
 
-from src.preprocess.filters import (apply_last_n_days_filter,
-                                    apply_min_relevance_filter,
-                                    apply_n_core_filter, sample_users)
+from src.preprocess.filters import (
+    apply_last_n_days_filter,
+    apply_min_relevance_filter,
+    apply_n_core_filter,
+    remove_consecutive_duplicates,
+    sample_users,
+)
 from src.preprocess.utils import dataset_stats, set_default_col_names
 from src.run_utils import dataframe_reader, dataframe_writer
 
@@ -32,58 +36,92 @@ def preprocess(
     time_col: str = "timestamp",
     relevance_col: str | None = "rating",
     meta_info: pd.DataFrame | pl.DataFrame | None = None,
+    audit: dict | None = None,
+    timestamp_unit: str = "s",
 ) -> tuple[pd.DataFrame | pl.DataFrame, pd.DataFrame | pl.DataFrame | None]:
+    """Clean source records before optional user sampling and N-core filtering.
+
+    Exact duplicates keep the last source occurrence; consecutive same-item runs
+    keep the first chronological event. Source order resolves timestamp ties.
+    ``_source_row`` is the zero-based input row position, retained for event identity.
+    If supplied, ``audit`` receives counts after each cleaning step.
+    Cleaning uses the configured source columns; output column names are normalized.
     """
-    - optional crop to the last N days
-    - columns renaming
-    - N-core or N-filter for items and sequences along with iterative
-    - removal of consecutive interactions with the same item
-    - optional label encoding of users only; item_id is left as in the source data
-    """
 
-    columns = [key for key in [user_col, item_col, time_col, relevance_col] if key is not None]
-    data = data[columns]
+    columns = [user_col, item_col, time_col]
+    if relevance_col is not None:
+        columns.append(relevance_col)
+    if "_source_row" in data.columns:
+        raise ValueError("_source_row is reserved for the original input row position")
+    source_columns = list(data.columns)
+    if isinstance(data, pd.DataFrame):
+        if data[[user_col, item_col, time_col]].isna().any().any():
+            raise ValueError("User IDs, item IDs, and timestamps must not be missing")
+        data = data.assign(_source_row=range(len(data)))
+    else:
+        if any(data[col].null_count() or (data[col].dtype.is_float() and data[col].is_nan().any())
+               for col in (user_col, item_col, time_col)):
+            raise ValueError("User IDs, item IDs, and timestamps must not be missing")
+        data = data.with_row_index("_source_row").with_columns(pl.col("_source_row").cast(pl.Int64))
 
-    data = set_default_col_names(data, user_col, item_col, time_col, relevance_col)
+    steps = []
+    if audit is not None:
+        audit["steps"] = steps
 
-    logging.info("Raw data:\n%s", dataset_stats(data, extended=True))
+    def record_step(name):
+        stats = dataset_stats(data, user_id=user_col, item_id=item_col, timestamp=time_col)
+        stats["removed_events"] = steps[-1]["n_interactions"] - len(data) if steps else 0
+        steps.append({"step": name, **stats})
+        logging.info("%s: %s", name, stats)
+
+    record_step("raw")
 
     # Before every count-based filter, so item_min_count and user_min_count are counted
     # inside the retained window rather than over the whole history.
     if last_n_days is not None:
-        logging.info(f"keeping the last {last_n_days} days of interactions")
-        logging.info("before cropping:\n%s", dataset_stats(data))
-        data = apply_last_n_days_filter(data, last_n_days)
-        logging.info("after cropping:\n%s", dataset_stats(data))
+        data = apply_last_n_days_filter(data, last_n_days, time_col=time_col, timestamp_unit=timestamp_unit)
+        record_step("last_n_days")
 
     if min_relevance is not None:
-        logging.info(f"filtering out events with {relevance_col!r} < {min_relevance}")
-        logging.info("before filtering:\n%s", dataset_stats(data))
-        data = apply_min_relevance_filter(data, min_relevance)
-        logging.info("after filtering:\n%s", dataset_stats(data))
+        if relevance_col is None:
+            raise ValueError("min_relevance requires a relevance_col")
+        data = apply_min_relevance_filter(data, min_relevance, relevance_col=relevance_col)
+        record_step("min_relevance")
+
+    # Compare all source fields before projecting model columns. Generated row
+    # identity must not prevent identical source records from matching.
+    if isinstance(data, pd.DataFrame):
+        data = data.drop_duplicates(subset=source_columns, keep="last")
+    else:
+        data = data.unique(subset=source_columns, keep="last", maintain_order=True)
+    record_step("exact_duplicates")
+    data = data[columns + ["_source_row"]]
+
+    if rm_consecutive_dups:
+        data = remove_consecutive_duplicates(data, user_col=user_col, item_col=item_col, time_col=time_col)
+        record_step("consecutive_repeats")
+    elif isinstance(data, pd.DataFrame):
+        data = data.sort_values([user_col, time_col], kind="stable")
+    else:
+        data = data.sort([user_col, time_col], maintain_order=True)
 
     if num_users is not None:
-        logging.info(f"subsampling {num_users} users")
-        logging.info("before subsampling:\n%s", dataset_stats(data))
-        data = sample_users(data, num_users)
-        logging.info("after subsampling:\n%s", dataset_stats(data))
+        data = sample_users(data, num_users, user_col=user_col)
+        record_step("sample_users")
 
     if n_core_filtering:
-        logging.info("applying N-core filtering")
-        logging.info("before N-core filtering:\n%s", dataset_stats(data))
         data = apply_n_core_filter(
             events=data,
             item_min_count=item_min_count,
             user_min_count=user_min_count,
             rm_consecutive_dups=rm_consecutive_dups,
+            user_col=user_col,
+            item_col=item_col,
+            time_col=time_col,
         )
-        logging.info("after N-core filtering:\n%s", dataset_stats(data, extended=True))
+        record_step("n_core")
 
-    elif not n_core_filtering:
-        logging.info("Skipping filtering")
-    else:
-        raise NotImplementedError("N-core filtering is only one available")
-
+    data = set_default_col_names(data, user_col, item_col, time_col, relevance_col)
     if meta_info is not None:
         meta_info = set_default_col_names(meta_info, user_col, item_col, time_col, relevance_col)
 
@@ -96,10 +134,15 @@ def main(config: DictConfig) -> None:
     print(OmegaConf.to_yaml(config, resolve=True))
 
     data_format = OmegaConf.select(config, "dataset.data_format", default="csv")
+    timestamp_unit = OmegaConf.select(config, "dataset.timestamp_unit", default="s")
     data_path = os.environ["SEQ_REC_DATA_PATH"]
     raw_dir = os.path.join(data_path, "raw")
 
     dataset_name = config.dataset.name
+    output_name = f"{dataset_name}_{config.suffix}" if config.suffix is not None else dataset_name
+    path_to_save = os.path.join(data_path, "preprocessed", output_name)
+    if os.path.exists(path_to_save):
+        raise FileExistsError(f"Output directory already exists: {path_to_save}. Choose another data root or suffix.")
     logging.info(f"started preprocessing for dataset {dataset_name}")
 
     data = dataframe_reader(os.path.join(raw_dir, dataset_name, f"{dataset_name}.{data_format}"), engine=config.engine)
@@ -110,17 +153,18 @@ def main(config: DictConfig) -> None:
     else:
         meta_info = None
 
+    audit = {}
     data, meta_info = preprocess(
         data=data,
         **config.preprocessing_params,
         **config.dataset.column_name,
         meta_info=meta_info,
+        audit=audit,
+        timestamp_unit=timestamp_unit,
     )
 
-    if getattr(config, "suffix", None) is not None:
-        dataset_name = f"{dataset_name}_{config.suffix}"
-    path_to_save = os.path.join(data_path, "preprocessed", dataset_name)
-    os.makedirs(path_to_save, exist_ok=True)
+    dataset_name = output_name
+    os.makedirs(path_to_save, exist_ok=False)
 
     # save config
     OmegaConf.save(config, os.path.join(path_to_save, "config.yaml"), resolve=True)
@@ -130,9 +174,10 @@ def main(config: DictConfig) -> None:
     if meta_info is not None:
         dataframe_writer(meta_info, os.path.join(path_to_save, f"{dataset_name}_meta.parquet"), engine=config.engine)
     # save statistics
-    stats = dataset_stats(data, extended=True)
+    stats = dataset_stats(data, extended=True, timestamp_unit=timestamp_unit)
+    stats["steps"] = audit["steps"]
     with open(os.path.join(path_to_save, "statistics.json"), "w") as f:
-        json.dump(stats, f)
+        json.dump(stats, f, indent=2, allow_nan=False)
 
 if __name__ == "__main__":
 

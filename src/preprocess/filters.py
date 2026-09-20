@@ -6,13 +6,7 @@ import numpy as np
 import pandas as pd
 import polars as pl
 
-from src.preprocess.utils import dataset_stats
-
-
-
-# Interaction timestamps are stored in seconds across the datasets of this study, the same
-# assumption `train_last_days` makes in runs/train.py.
-SECONDS_PER_DAY = 86400
+from src.preprocess.utils import TIMESTAMP_UNITS_PER_DAY, dataset_stats
 
 
 # === APPLY LAST N DAYS FILTER ===
@@ -20,6 +14,7 @@ def apply_last_n_days_filter(
     events: pd.DataFrame | pl.DataFrame,
     last_n_days: float | int,
     time_col: str = "timestamp",
+    timestamp_unit: str = "s",
 ) -> pd.DataFrame | pl.DataFrame:
     """
     Keeps only the interactions from the last `last_n_days` days of the data.
@@ -30,16 +25,18 @@ def apply_last_n_days_filter(
     Args:
         events (pd.DataFrame | pl.DataFrame): Input events dataframe (pandas or polars).
         last_n_days (float | int): Width of the retained window, in days.
-        time_col (str, optional): Column name for timestamps, in seconds. Defaults to "timestamp".
+        time_col (str, optional): Column name for timestamps. Defaults to "timestamp".
+        timestamp_unit (str, optional): Timestamp unit, "s" or "ms". Defaults to "s".
 
     Returns:
         pd.DataFrame | pl.DataFrame: Events at or after the cutoff.
     """
+    window = last_n_days * TIMESTAMP_UNITS_PER_DAY[timestamp_unit]
     if isinstance(events, pd.DataFrame):
-        cutoff = events[time_col].max() - last_n_days * SECONDS_PER_DAY
+        cutoff = events[time_col].max() - window
         return events[events[time_col] >= cutoff]
     elif isinstance(events, pl.DataFrame):
-        cutoff = events[time_col].max() - last_n_days * SECONDS_PER_DAY
+        cutoff = events[time_col].max() - window
         return events.filter(pl.col(time_col) >= cutoff)
     else:
         raise TypeError(f"expected either `pandas.DataFrame` or `polars.DataFrame`, got {type(events)!r}")
@@ -92,7 +89,7 @@ def apply_n_core_filter(
     if rm_consecutive_dups:
         events = remove_consecutive_duplicates(events, user_col, item_col, time_col)
         print("After consecutive repeats filtering")
-        print(dataset_stats(events))
+        print(dataset_stats(events, user_id=user_col, item_id=item_col, timestamp=time_col))
 
     step = 1
     height = -1
@@ -106,7 +103,7 @@ def apply_n_core_filter(
             events = remove_consecutive_duplicates(events, user_col, item_col, time_col)
 
         print(f"After n-core filtering on step {step}")
-        print(dataset_stats(events))
+        print(dataset_stats(events, user_id=user_col, item_id=item_col, timestamp=time_col))
         step += 1
 
     return events

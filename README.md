@@ -8,8 +8,9 @@ FAISS residual quantization, training, and evaluation. Hydra configs live in
 DiskTracker and ClearML are available, with DiskTracker selected by default.
 
 The research protocol and decisions are in [codex_plan.md](../codex_plan.md).
-The baseline retains the source preprocessing and model behavior. The planned
-cold-input preprocessing changes belong after the user's initial commit.
+Beauty 2014 is the first dataset for the cleaning and audit stage. Sequence
+lengths and Amazon temporal boundaries remain undecided; model and splitting
+code still use the baseline protocol.
 
 ## Environment and entry points
 
@@ -62,16 +63,14 @@ source behavior: when `filter_seen=false`, padding class 0 remains eligible for
 prediction. SASRec supports `dataset.filter_seen`; all retained dataset defaults
 set it to false. Its tracker names include SASRec settings without quantizer fields.
 
-The three `sh/prepare_*.sh` examples contain shared data paths and inherited
-preprocessing settings. Review their paths before running them. Test preparation
-uses a local data root. No historical experiment presets or generated runs are
-included. The source Git history is not part of this project.
+`sh/prepare_data.sh` contains the current cleaning commands. Test preparation
+uses a local data root. No historical experiment presets, generated runs, or
+source Git history are included.
 
 ## Baseline limitations
 
 - Dataset names and numerical settings describe the source SID pipeline; they
   are not finalized settings for the cold-input study.
-- Consecutive-repeat removal currently runs only with N-core filtering.
 - Training suffixes are chosen during dataset access, after the split vocabulary
   has been defined. Fixed suffixes therefore do not yet define item warmth.
 - Cold-only histories are removed by source split alignment. Cold-input
@@ -84,7 +83,47 @@ included. The source Git history is not part of this project.
 - Sequential assignment preserves insertion order. Stable extension of a fitted
   SID mapping to later cold items is not implemented.
 
+## Data preprocessing
+
+Shared settings live in `runs/config/preprocess.yaml`. `sh/prepare_data.sh` has
+separate blocks for Beauty 2014, Sports 2014, Toys 2014, Beauty 2023, Yambda 50M,
+and Yambda 500M. Set its environment variables, then copy individual commands
+or run the script from the project root. Inspect Beauty 2014 without running it:
+
+```bash
+python -B runs/preprocess.py dataset=Beauty2014 dataset.name=Beauty2014 --cfg job --resolve
+```
+
+Main preprocessing has no user/item frequency filter, user sampling, or sequence
+truncation. Amazon has no rating threshold; Yambda uses `played_ratio_pct >= 50`,
+with the final 30-day window applied first for 500M. Exact source-record duplicates
+keep their last occurrence. Stable ordering preserves timestamp ties, and
+consecutive same-item runs keep their first event. Existing filter helpers perform
+these operations; `dataset_stats` supplies the audit.
+
+Raw interactions and optional metadata are read from `SEQ_REC_DATA_PATH/raw/`.
+Output uses `preprocessed/<dataset>_cold_inputs/`: interactions, optional metadata,
+`config.yaml`, and `statistics.json`. `_source_row` identifies the original row.
+Statistics contain per-step removals, timestamp ties, and cleaned history-length
+and item-frequency distributions. Missing IDs/timestamps and existing output
+directories raise errors. Beauty 2023 requires the default Polars engine for
+deduplication of its nested `images` field. `dataset.timestamp_unit` is `ms` for
+Beauty 2023 and defaults to `s` elsewhere. Day-window filters and day-range
+statistics respect this setting; saved timestamps retain their original values.
+Splitting and training remain separate.
+
 ## Validation
+
+Run the preprocessing regression checks with synthetic data on CPU:
+
+```bash
+PYTHONPATH=. ../../sem_venv_311_av/bin/python -B codex_tests/codex_check_preprocessing.py
+```
+
+These cover Pandas/Polars agreement, source-record identity, ordering, repeats,
+singletons, inclusive window boundaries, relevance filtering, empty results,
+missing fields, saved audits, and overwrite protection. Temporary fixtures stay
+inside `codex_validation/` and are removed after the checks.
 
 Run the approved CPU checks from this directory:
 
@@ -92,8 +131,9 @@ Run the approved CPU checks from this directory:
 bash codex_tests/codex_validate.sh
 ```
 
-The equivalence check reads `../../sid_scaling` and compares it with this project
-using Sequential explicitly. It includes manual split and ranking-metric checks.
+The equivalence check reads `../../sid_scaling` and compares the retained model
+and split behavior using Sequential explicitly. Cleaning follows the separate
+preprocessing checks above. It includes manual split and ranking-metric checks.
 SASRec parity checks read `../../semantic-ids` and compare dataset windows, model
 outputs, loss, gradients, ranking, and validation metrics with the source.
 Both recipes have a synthetic two-epoch CPU test with saved validation each epoch
