@@ -1,10 +1,8 @@
 """Data splits.
 
-The splitters produce train / validation / test subsets and return them as a
-dict. Validation is returned as a single combined sequence (input + target) so
-the training pipeline can keep deriving the target with ``last_item_split`` at
-eval time, while test is returned pre-separated into ``test_input`` and
-``test_target``.
+The splitters return separate inputs and targets for validation and test.
+Global temporal splitting produces three input variants and exact training
+frequency statistics. Rare-item thresholds are applied after splitting.
 
 Target selection is always leave-last-out. Input/target separation, cold
 filtering and user alignment happen inside the splitters.
@@ -12,7 +10,6 @@ filtering and user alignment happen inside the splitters.
 
 from abc import ABC, abstractmethod
 from datetime import datetime
-from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -26,17 +23,23 @@ def leave_last(
     input_data: pd.DataFrame | None = None,
     user_col: str = "user_id",
     time_col: str = "timestamp",
+    eligible_items=None,
+    item_col: str = "item_id",
 ):
     """Leave-last-out split.
 
-    The last interaction per user in ``holdout_data`` becomes the target, all
-    previous ones become input. If ``input_data`` is provided, it is prepended to
+    The last eligible interaction per user becomes the target. All original
+    preceding events become input. If ``input_data`` is provided, it is prepended to
     the input (combining an existing input sequence with earlier holdout events).
     """
     data_sorted = holdout_data.sort_values([user_col, time_col], kind="stable")
-    time_idx_reversed = data_sorted.groupby(user_col).cumcount(ascending=False)
-    final_input = data_sorted[time_idx_reversed > 0]
-    targets = data_sorted[time_idx_reversed == 0]
+    positions = np.arange(len(data_sorted))
+    eligible = np.ones(len(data_sorted), dtype=bool) if eligible_items is None else data_sorted[item_col].isin(eligible_items)
+    candidate_positions = pd.Series(positions[eligible], index=data_sorted.loc[eligible, user_col])
+    last_positions = candidate_positions.groupby(level=0).max()
+    target_positions = data_sorted[user_col].map(last_positions)
+    final_input = data_sorted[positions < target_positions]
+    targets = data_sorted[positions == target_positions]
 
     if input_data is not None:
         # keep temporal order (sort by time, not item_id)
@@ -125,13 +128,10 @@ class LeaveOneOutSplitter(SplittingStrategy):
         # keep only train users with at least two interactions (min-count guarantee)
         train = train[train.groupby(self.user_col)[self.user_col].transform("size") >= 2]
 
-        validation = pd.concat([val_input, val_target], ignore_index=True).sort_values(
-            [self.user_col, self.time_col], kind="stable"
-        )
-
         return {
             "train": train,
-            "validation": validation,
+            "validation_input": val_input,
+            "validation_target": val_target,
             "test_input": test_input,
             "test_target": test_target,
         }
@@ -150,99 +150,123 @@ class GlobalTimeSplitter(SplittingStrategy):
     """Global temporal split.
 
     Train / test are split by a global time threshold. Training is further split
-    into train / validation by ``val_type`` ('by_user', 'by_time' or
-    'last_train_item'). Target selection is leave-last-out. Cold filtering and
-    alignment are applied per input/target before validation is recombined.
+    into train / validation by a second global time threshold.
+    Fixed training suffixes define item membership. Each holdout has shared
+    targets and retain, remove-then-crop, and crop-then-remove input variants.
+    Target records contain original-history histograms for later rarity analysis.
     """
 
     def __init__(
         self,
         time_threshold: int | datetime | str | float,
+        val_time_threshold: int | datetime | str | float,
+        train_max_events: int,
         time_format: str | None = None,
-        val_type: Literal["by_user", "by_time", "last_train_item"] = "by_user",
-        val_num_users: int | float | None = None,
-        val_time_threshold: int | datetime | str | float | None = None,
         user_col: str = "user_id",
         item_col: str = "item_id",
         time_col: str = "timestamp",
-        remove_cold_items: bool = False,
-        remove_cold_users: bool = False,
-        random_state=42,
+        remove_unseen_users: bool = False,
+        remove_unseen_targets: bool = True,
     ) -> None:
 
         self.time_threshold = time_threshold
         self.time_format = time_format
 
-        self.val_type = val_type
-
-        if val_type == "by_user":
-            assert val_num_users is not None
-        elif val_type == "by_time":
-            assert val_time_threshold is not None
-
         self.val_time_threshold = val_time_threshold
-        self.val_num_users = val_num_users
 
         self.user_col = user_col
         self.item_col = item_col
         self.time_col = time_col
 
-        self.remove_cold_items = remove_cold_items
-        self.remove_cold_users = remove_cold_users
+        self.remove_unseen_users = remove_unseen_users
+        self.remove_unseen_targets = remove_unseen_targets
 
-        self.random_state = random_state
+        if isinstance(train_max_events, bool) or not isinstance(train_max_events, int) or train_max_events < 2:
+            raise ValueError("train_max_events must be an integer of at least two")
+        self.train_max_events = train_max_events
 
     def split(self, data: pd.DataFrame) -> dict:
 
-        data = data.sort_values([self.user_col, self.time_col], kind="stable")
+        if "_source_row" not in data or data["_source_row"].isna().any() or not data["_source_row"].is_unique:
+            raise ValueError("Temporal splitting requires unique non-null _source_row identities")
+        data = data.sort_values([self.user_col, self.time_col, "_source_row"], kind="stable")
 
-        # global split -> train and test (input / holdout)
+        # 1. Temporal windows retain the inherited training-user eligibility.
+        self.resolved_time_threshold = self._resolve_time_threshold(self.time_threshold, data)
         train, test_input, test_holdout = self.split_by_time(data, self.time_threshold)
+        self.resolved_val_time_threshold = self._resolve_time_threshold(self.val_time_threshold, train)
+        train, val_input, val_holdout = self.split_by_time(train, self.val_time_threshold)
 
-        # validation holdout / target according to strategy
-        if self.val_type == "by_time":
-            train, val_input, val_holdout = self.split_by_time(train, self.val_time_threshold)
-            val_holdout_is_target = False
-        elif self.val_type == "by_user":
-            train, val_input, val_holdout = self.split_validation_by_user(train)
-            val_holdout_is_target = True
-        elif self.val_type == "last_train_item":
-            train, val_input, val_holdout = self.split_validation_last_train(train)
-            val_holdout_is_target = True
-        else:
-            raise ValueError("Wrong val_type.")
+        # 2. Crop training only; evaluation histories remain available.
+        period_counts = train.groupby(self.item_col).size()
+        train = train.groupby(self.user_col, sort=False).tail(self.train_max_events).copy()
 
-        # cold filtering on input/holdout before target selection
-        if self.remove_cold_items:
-            val_input, val_holdout = filter_cold(self.item_col, train, val_input, val_holdout, self.user_col)
-            test_input, test_holdout = filter_cold(self.item_col, train, test_input, test_holdout, self.user_col)
-        if self.remove_cold_users:
-            # by_user validation users are drawn from train, so never cold
-            if self.val_type != "by_user":
-                val_input, val_holdout = filter_cold(self.user_col, train, val_input, val_holdout, self.user_col)
-            test_input, test_holdout = filter_cold(self.user_col, train, test_input, test_holdout, self.user_col)
-
-        # target selection = leave-last-out
-        if val_holdout_is_target:
-            val_target = val_holdout
-        else:
-            val_input, val_target = leave_last(val_holdout, val_input, self.user_col, self.time_col)
-        test_input, test_target = leave_last(test_holdout, test_input, self.user_col, self.time_col)
-
-        val_input, val_target = align_input_target(val_input, val_target, self.user_col)
-        test_input, test_target = align_input_target(test_input, test_target, self.user_col)
-
-        # combine validation input + target to preserve training logic
-        validation = pd.concat([val_input, val_target], ignore_index=True).sort_values(
-            [self.user_col, self.time_col], kind="stable"
-        )
-
-        return {
-            "train": train,
-            "validation": validation,
-            "test_input": test_input,
-            "test_target": test_target,
+        # 3. Freeze exact training counts; rarity is computed after splitting.
+        item_stats = train.groupby(self.item_col).agg(
+            training_events=(self.user_col, "size"), training_users=(self.user_col, "nunique"))
+        item_stats = item_stats.reindex(pd.Index(data[self.item_col].unique(), name=self.item_col), fill_value=0)
+        item_stats["training_period_events"] = period_counts.reindex(item_stats.index, fill_value=0)
+        item_counts = item_stats.training_events
+        eligible_items = item_counts.index[item_counts > 0] if self.remove_unseen_targets else None
+        result = {"train": train, "item_stats": item_stats.reset_index()}
+        self.statistics = {
+            "time_threshold": self.resolved_time_threshold,
+            "val_time_threshold": self.resolved_val_time_threshold,
         }
+
+        for name, earlier, holdout in (("validation", val_input, val_holdout), ("test", test_input, test_holdout)):
+            # 4. Select a target and combine the original pre-target events.
+            inputs, targets = leave_last(holdout, earlier, self.user_col, self.time_col, eligible_items, self.item_col)
+            summary = {"holdout_users": int(holdout[self.user_col].nunique()),
+                       "users_without_eligible_target": int(holdout[self.user_col].nunique() - len(targets))}
+            before_user_filter = len(targets)
+            if self.remove_unseen_users:
+                inputs, targets = filter_cold(self.user_col, train, inputs, targets, self.user_col)
+            summary["unseen_users_removed"] = before_user_filter - len(targets)
+
+            # 5. Align original histories and save their threshold-independent statistics.
+            before_alignment = len(targets)
+            inputs, targets = align_input_target(inputs, targets, self.user_col)
+            targets = targets.copy()
+            summary["users_without_history"] = before_alignment - len(targets)
+            targets["target_training_events"] = targets[self.item_col].map(item_counts)
+            self._add_input_stats(targets, inputs, item_counts, "history")
+            frequencies = inputs[[self.user_col]].assign(training_events=inputs[self.item_col].map(item_counts))
+            histogram = frequencies.groupby([self.user_col, "training_events"]).size().reset_index(name="input_events")
+            histograms = {user: frame[["training_events", "input_events"]].to_dict("records")
+                          for user, frame in histogram.groupby(self.user_col)}
+            targets["history_frequency_histogram"] = targets[self.user_col].map(histograms)
+
+            # 6. Build all three variants from the same original history.
+            retained = inputs.groupby(self.user_col, sort=False).tail(self.train_max_events - 1)
+            seen_inputs = inputs[inputs[self.item_col].map(item_counts) > 0]
+            variants = {
+                "retain": retained,
+                "remove_then_crop": seen_inputs.groupby(self.user_col, sort=False).tail(self.train_max_events - 1),
+                "crop_then_remove": retained[retained[self.item_col].map(item_counts) > 0],
+            }
+            for variant, variant_input in variants.items():
+                # 7. Align each variant without dropping shared target records.
+                variant_input, _ = align_input_target(variant_input, targets, self.user_col)
+                self._add_input_stats(targets, variant_input, item_counts, variant)
+                result[f"{name}_input_{variant}"] = variant_input.copy()
+            result[f"{name}_target"] = targets
+            summary["target_users"] = len(targets)
+            self.statistics[name] = summary
+        return result
+
+    def _add_input_stats(self, targets, inputs, item_counts, prefix):
+        lengths = inputs.groupby(self.user_col).size()
+        unseen = inputs[inputs[self.item_col].map(item_counts) == 0].groupby(self.user_col).size()
+        events = targets[self.user_col].map(lengths).fillna(0).astype("int64")
+        unseen_events = targets[self.user_col].map(unseen).fillna(0).astype("int64")
+        targets[f"{prefix}_events"] = events
+        targets[f"{prefix}_unseen_events"] = unseen_events
+        targets[f"{prefix}_unseen_share"] = unseen_events / events.replace(0, np.nan)
+        targets[f"{prefix}_available"] = events > 0
+        targets[f"{prefix}_group"] = np.select(
+            [events == 0, unseen_events == 0, unseen_events == events],
+            [None, "seen_only", "unseen_only"], default="mixed")
 
     def split_by_time(self, data, time_threshold):
 
@@ -289,45 +313,6 @@ class GlobalTimeSplitter(SplittingStrategy):
             time_threshold = data[self.time_col].quantile(time_threshold)
 
         return time_threshold
-
-    def split_validation_by_user(self, train):
-        """Random subset of train users held out for validation (target = last)."""
-
-        val_num_users = self.val_num_users
-        users = train[self.user_col].unique()
-
-        if isinstance(val_num_users, float):
-            assert 0 <= val_num_users <= 1
-            val_num_users = int(len(users) * val_num_users)
-
-        validation_users = np.random.default_rng(seed=self.random_state).choice(users, size=val_num_users, replace=False)  # fmt: skip
-
-        validation = train[train[self.user_col].isin(validation_users)]
-        train = train[~train[self.user_col].isin(validation_users)]
-
-        val_input, val_target = leave_last(validation, user_col=self.user_col, time_col=self.time_col)
-
-        return train, val_input, val_target
-
-    def split_validation_last_train(self, train):
-        """Last training interaction per user as validation target."""
-
-        train = train.sort_values([self.user_col, self.time_col], kind="stable")
-        train["time_idx_reversed"] = train.groupby(self.user_col).cumcount(ascending=False)
-
-        # at least two interactions in validation
-        validation = train[train.groupby(self.user_col)["time_idx_reversed"].transform("max") > 0].drop(
-            columns=["time_idx_reversed"]
-        )
-        val_input, val_target = leave_last(validation, user_col=self.user_col, time_col=self.time_col)
-
-        train = train[train.time_idx_reversed >= 1]
-        # at least two interactions remaining in train
-        train = train[train.groupby(self.user_col)["time_idx_reversed"].transform("max") > 1].drop(
-            columns=["time_idx_reversed"]
-        )
-
-        return train, val_input, val_target
 
 
 def last_item_split(df, user_col='user_id', timestamp_col='timestamp'):

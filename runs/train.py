@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 import torch
 from hydra.utils import instantiate, get_class
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader
 
@@ -18,6 +18,7 @@ from src.datasets import PaddingCollateFn
 from src.metrics import Evaluator
 from src.postprocess import preds2recs
 from src.preprocess.data_stats import base_stats
+from src.preprocess.splits import align_input_target
 from src.run_utils import count_parameters
 from src.trackers import ExperimentTracker
 
@@ -35,10 +36,18 @@ def prepare_data(config: DictConfig, semantic_ids=None):
 
     seq_rec_data_path = os.getenv("SEQ_REC_DATA_PATH")
     data_path = os.path.join(seq_rec_data_path, 'split', config.dataset.name, config.split_name)
+    split_config = OmegaConf.load(os.path.join(data_path, "config.yaml"))
+    temporal = split_config.splitting_strategy._target_.endswith("GlobalTimeSplitter")
+    variant = config.input_variant
+    if variant not in ("retain", "remove_then_crop", "crop_then_remove"):
+        raise ValueError(f"Unknown input_variant: {variant}")
+    if temporal and config.train_last_days is not None:
+        raise ValueError("train_last_days would change the fixed training set and invalidate split statistics")
 
     data = {}
-    for subset in ("train", "validation", "test_input", "test_target"):
-        subset_path = os.path.join(data_path, f'{subset}.parquet')
+    for subset in ("train", "validation_input", "validation_target", "test_input", "test_target"):
+        filename = f"{subset}_{variant}" if temporal and subset.endswith("_input") else subset
+        subset_path = os.path.join(data_path, f'{filename}.parquet')
         data[subset] = pd.read_parquet(subset_path)
 
         if config.item_id_offset is not None:
@@ -46,6 +55,22 @@ def prepare_data(config: DictConfig, semantic_ids=None):
 
         print(f'{subset} shape', data[subset].shape)
         print(f'{subset} stats\n', base_stats(data[subset], extended=False))
+
+    for name in ("validation", "test"):
+        data[f"{name}_input"], data[f"{name}_target"] = align_input_target(
+            data[f"{name}_input"], data[f"{name}_target"])
+
+    if temporal:
+        train_params = config.dataset_params.train_dataset
+        predict_params = config.dataset_params.predict_dataset
+        tokens = int(semantic_ids.shape[1]) if semantic_ids is not None else 1
+        train_limit = int(train_params.max_length) // tokens if semantic_ids is not None else int(train_params.max_length) + 1
+        input_limit = (int(predict_params.max_length) - int(predict_params.get("shift", 0))) // tokens
+        if data["train"].groupby("user_id").size().max() > train_limit:
+            raise ValueError("Training dataset max_length would crop the fixed training events again")
+        for name in ("validation_input", "test_input"):
+            if data[name].groupby("user_id").size().max() > input_limit:
+                raise ValueError(f"Prediction dataset max_length would crop prepared {name} again")
 
     if semantic_ids is not None:
         item_count = int(semantic_ids.max())
@@ -67,14 +92,15 @@ def prepare_data(config: DictConfig, semantic_ids=None):
     return data, item_count, semantic_ids
 
 
-def create_dataloaders(train, validation, config, semantic_ids=None):
+def create_dataloaders(train, validation_input, validation_target, config, semantic_ids=None):
 
     validation_size = config.dataloader.validation_size
-    validation_users = validation.user_id.unique()
+    validation_users = validation_target.user_id.unique()
     if validation_size and (validation_size < len(validation_users)):
         validation_users = np.random.choice(validation_users, size=validation_size, replace=False)
-        validation = validation[validation.user_id.isin(validation_users)]
-        print(f'validation-it-training stats', base_stats(validation, extended=False))
+        validation_input = validation_input[validation_input.user_id.isin(validation_users)]
+        validation_target = validation_target[validation_target.user_id.isin(validation_users)]
+        print(f'validation-it-training stats', base_stats(validation_input, extended=False))
 
     extra_kwargs = {'semantic_ids': semantic_ids} if semantic_ids is not None else {}
 
@@ -82,7 +108,8 @@ def create_dataloaders(train, validation, config, semantic_ids=None):
     train_dataset = instantiate(config.dataset_params.train_dataset, df=train, random_state=int(config.random_state), **train_kwargs)
 
     eval_kwargs = filter_kwargs(config.dataset_params.predict_dataset._target_, **extra_kwargs)
-    eval_dataset = instantiate(config.dataset_params.predict_dataset, df=validation, validation_mode=True, **eval_kwargs)
+    eval_dataset = instantiate(config.dataset_params.predict_dataset, df=validation_input,
+                               targets=validation_target, validation_mode=True, **eval_kwargs)
 
     left_padding = getattr(config.model, "left_padding", False)
     train_loader = DataLoader(train_dataset, batch_size=config.dataloader.batch_size,
@@ -272,6 +299,8 @@ def evaluate(recs, test, train, experiment: ExperimentTracker, config, prefix='t
         dict mapping the prefixed metric name (e.g. ``'val_NDCG@10'``) to its value.
     """
     start_time = time.time()
+    if "history_frequency_histogram" in test and set(recs.user_id) != set(test.user_id):
+        raise ValueError("Prediction users do not match the selected targets")
     evaluator = Evaluator(metrics=list(config.evaluator.metrics),
                             top_k=list(config.evaluator.top_k),
                             polars_metrics=config.evaluator.polars_metrics)
@@ -287,6 +316,18 @@ def evaluate(recs, test, train, experiment: ExperimentTracker, config, prefix='t
     metrics_df.columns = ['metric_name', 'metric_value']
     experiment.log_table(df=metrics_df, title=f'{prefix}_metrics', series='dataframe')
     experiment.log_artifact(f'{prefix}_metrics', metrics_df)
+
+    if "history_frequency_histogram" in test:
+        per_user = _per_user_metrics(recs, test, train, config)
+        if set(per_user.index) != set(test.user_id):
+            raise ValueError("Per-user metric population does not match the selected targets")
+        for column in per_user:
+            aggregate = metrics_dict.get(f"{prefix}_{column}")
+            if aggregate is not None and not np.isclose(per_user[column].mean(), aggregate):
+                raise ValueError(f"Per-user aggregation disagrees with {column}")
+        per_user = test.merge(per_user, left_on="user_id", right_index=True, validate="one_to_one")
+        per_user["input_variant"] = config.input_variant
+        experiment.log_artifact(f"{prefix}_per_user_metrics", per_user)
 
     if warm_items is not None:
         log_stratified_metrics(recs, test, train, experiment, config, prefix,

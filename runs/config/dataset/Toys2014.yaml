@@ -1,9 +1,5 @@
-# Prepared for the SID scaling study by sh/prepare_Amazon.sh: `name` is the
-# PREPROCESSED dataset (5-core, dedup, global temporal split at the 0.9 quantile,
-# val-by-time). The preprocess step reads the raw data, so it passes
-# `dataset.name=Toys2014`.
 name: Toys2014_scaling
-seq_length_items: 16  # items of user history kept per training sequence
+seq_length_items: 16
 filter_seen: False
 column_name:
   user_col: 'user_id'

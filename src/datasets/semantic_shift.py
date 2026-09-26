@@ -66,12 +66,13 @@ class CausalLMPredictionDatasetSIDShift(SIDMapperMixin, LMDataset):
     def __init__(self, df, semantic_ids,
                  max_length=512, shift=2, validation_mode=True,
                  user_col='user_id', item_col='item_id',
-                 time_col='timestamp'):
+                 time_col='timestamp', targets=None):
 
         super().__init__(df, max_length=max_length,
                          user_col=user_col, item_col=item_col, time_col=time_col)
 
         self.validation_mode = validation_mode
+        self.targets = targets.set_index(user_col)[item_col] if targets is not None else None
         self.semantic_ids = semantic_ids
         self.shift = shift
 
@@ -82,8 +83,8 @@ class CausalLMPredictionDatasetSIDShift(SIDMapperMixin, LMDataset):
 
         if self.validation_mode:
 
-            target = np.array(item_sequence[-1])
-            input_ids = np.array(item_sequence[:-1])
+            target = self.targets.loc[user_id] if self.targets is not None else item_sequence[-1]
+            input_ids = np.array(item_sequence if self.targets is not None else item_sequence[:-1])
 
             input_ids_sid = self._index_mapping(input_ids)
             if len(input_ids_sid) > self.max_length - self.shift:

@@ -26,15 +26,22 @@ class CausalLMDataset(LMDataset):
 class CausalLMPredictionDataset(LMDataset):
 
     def __init__(self, df, max_length=128, validation_mode=False,
-                 user_col='user_id', item_col='item_id', time_col='timestamp'):
+                 user_col='user_id', item_col='item_id', time_col='timestamp', targets=None):
         super().__init__(df, max_length=max_length, user_col=user_col,
                          item_col=item_col, time_col=time_col)
         self.validation_mode = validation_mode
+        self.targets = targets.set_index(user_col)[item_col] if targets is not None else None
 
     def __getitem__(self, idx):
         user_id = self.user_ids[idx]
         item_sequence = self.data[user_id]
         if self.validation_mode:
+            if self.targets is not None:
+                target = self.targets.loc[user_id]
+                input_ids = np.array(item_sequence[-self.max_length:])
+                labels = np.concatenate([input_ids[1:], np.array([target])])
+                return {'input_ids': input_ids, 'user_id': user_id,
+                        'full_history': item_sequence, 'labels': labels, 'target': target}
             target = item_sequence[-1]
             window = min(self.max_length, len(item_sequence) - 1)
             input_ids = item_sequence[-window-1:-1]

@@ -33,6 +33,7 @@ quantizer:
   num_codebooks: ${sub:${num_tokens_per_item},1}
 
 split_name: gts_q09_val_by_time
+input_variant: remove_then_crop
 
 optimize_metric: val_NDCG@10
 

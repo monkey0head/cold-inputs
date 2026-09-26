@@ -17,7 +17,6 @@ from omegaconf import DictConfig, OmegaConf
 from runs._resolvers import register_resolvers
 from runs.train import (create_dataloaders, create_model, evaluate, load_for_eval,
                         predict, prepare_data, training)
-from src.preprocess.splits import last_item_split
 from src.preprocess.training_exposure import (ExposureStats, compute_item_collision_props,
                                               compute_training_exposure, log_capacity_stats,
                                               log_exposure_stats, log_subset_stats)
@@ -97,7 +96,8 @@ def run_training(config: DictConfig, experiment: ExperimentTracker, semantic_ids
     else:
         log_subset_stats(data, experiment, catalog_size=int(item_count))
 
-    train_loader, eval_loader = create_dataloaders(data["train"], data["validation"], config, semantic_ids)
+    train_loader, eval_loader = create_dataloaders(
+        data["train"], data["validation_input"], data["validation_target"], config, semantic_ids)
 
     model = create_model(config, item_count, semantic_ids)
     if config.eval_checkpoint:
@@ -128,7 +128,7 @@ def run_training(config: DictConfig, experiment: ExperimentTracker, semantic_ids
 
     metrics_val = None
     if config.calc_val_metrics:
-        validation_input, validation_target = last_item_split(data["validation"])
+        validation_input, validation_target = data["validation_input"], data["validation_target"]
         recs_val = predict(trainer, seqrec_module, validation_input, config, experiment, semantic_ids, prefix="val")
         metrics_val = evaluate(recs_val, validation_target, data["train"], experiment, config, prefix="val", **strata)
 

@@ -19,13 +19,15 @@ def main(config: DictConfig) -> None:
 
     dataset_name = config.dataset.name
     base_path = os.path.join(os.environ["SEQ_REC_DATA_PATH"], "preprocessed", dataset_name)
+    output_dir = os.path.join(os.environ["SEQ_REC_DATA_PATH"], "split", dataset_name, config.split_name)
+    if os.path.exists(output_dir):
+        raise FileExistsError(f"Refusing to overwrite existing split: {output_dir}")
+
+    splitting_strategy = hydra.utils.instantiate(config.splitting_strategy)
 
     data = pandas_reader(os.path.join(base_path, f"{dataset_name}.parquet"))
     metadata = pandas_reader(os.path.join(base_path, f"{dataset_name}_meta.parquet"))
 
-    splitting_strategy = hydra.utils.instantiate(config.splitting_strategy)
-    # split() returns train / validation (combined input+target) / test_input / test_target.
-    # Input/target separation, cold filtering and alignment happen inside the splitter.
     split = splitting_strategy.split(data)
 
     # encode item and user IDs
@@ -44,24 +46,33 @@ def main(config: DictConfig) -> None:
                 mapping=item_mapping,
                 expand_mapping=True,
             )
-            split[subset], user_mapping = encode(
-                split[subset],
-                col="user_id",
-                mapping=user_mapping,
-                expand_mapping=True,
-            )
+            if "user_id" in split[subset]:
+                split[subset], user_mapping = encode(
+                    split[subset],
+                    col="user_id",
+                    mapping=user_mapping,
+                    expand_mapping=True,
+                )
 
     metadata, item_mapping = encode(metadata, col="item_id", mapping=item_mapping, expand_mapping=True)
 
     split_stats = {}
     timestamp_unit = OmegaConf.select(config, "dataset.timestamp_unit", default="s")
     for dataset in split:
+        if dataset == "item_stats":
+            frequencies = split[dataset].groupby("training_events").size()
+            split_stats[dataset] = {
+                "n_items": len(split[dataset]),
+                "frequency_histogram": [{"training_events": int(frequency), "n_items": int(count)}
+                                        for frequency, count in frequencies.items()],
+            }
+            continue
         split_stats[dataset] = dataset_stats(split[dataset], extended=True, timestamp_unit=timestamp_unit)
         print(f"{dataset} statistics")
         print(split_stats[dataset])
 
-    output_dir = os.path.join(os.environ["SEQ_REC_DATA_PATH"], 'split', dataset_name, config.split_name)
-    os.makedirs(output_dir, exist_ok=True)
+    split_stats["protocol"] = getattr(splitting_strategy, "statistics", {})
+    os.makedirs(output_dir, exist_ok=False)
 
     # save config
     OmegaConf.save(config, os.path.join(output_dir, "config.yaml"))

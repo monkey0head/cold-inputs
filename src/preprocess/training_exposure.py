@@ -34,11 +34,10 @@ def _to_scalar(value):
 def log_subset_stats(data: dict, experiment, catalog_size: int | None = None) -> None:
     """Log core dataset statistics per subset (#1).
 
-    ``train`` / ``validation`` / ``test_input`` get the full extended ``base_stats``
-    (item/user occurrence + temporal). ``test_target`` has one row per user, so only
-    its target-item counts are meaningful.
+    Training and evaluation inputs get the full extended ``base_stats``.
+    Targets have one row per user, so only their target-item counts are meaningful.
     """
-    for subset in ("train", "validation", "test_input"):
+    for subset in ("train", "validation_input", "test_input"):
         df = data.get(subset)
         if df is None or len(df) == 0:
             continue
@@ -47,13 +46,14 @@ def log_subset_stats(data: dict, experiment, catalog_size: int | None = None) ->
         table = stats.to_frame(name="value").reset_index(names="stat")
         experiment.log_table(df=table, title=f"data_stats_{subset}", series="subset")
 
-    tgt = data.get("test_target")
-    if tgt is not None and len(tgt) > 0:
-        experiment.log_scalars({
-            "data/test_target/n_users": int(tgt["user_id"].nunique()),
-            "data/test_target/n_target_items": int(tgt["item_id"].nunique()),
-            "data/test_target/n_interactions": int(len(tgt)),
-        })
+    for subset in ("validation_target", "test_target"):
+        target = data.get(subset)
+        if target is not None and len(target) > 0:
+            experiment.log_scalars({
+                f"data/{subset}/n_users": int(target["user_id"].nunique()),
+                f"data/{subset}/n_target_items": int(target["item_id"].nunique()),
+                f"data/{subset}/n_interactions": int(len(target)),
+            })
 
     if catalog_size is not None:
         experiment.log_scalar("data/catalog_size", int(catalog_size))

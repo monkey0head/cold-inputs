@@ -5,7 +5,7 @@ defaults:
 engine: polars
 
 preprocessing_params:
-  n_core_filtering: false  # No user/item frequency filtering in the main setting.
+  n_core_filtering: true  # Iterative user/item 5-core filtering before splitting.
   # Independent of N-core filtering; repeated during N-core iterations when enabled.
   rm_consecutive_dups: true
   item_min_count: 5  # Used only when n_core_filtering is enabled.
