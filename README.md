@@ -7,17 +7,16 @@ FAISS residual quantization, training, and evaluation. Hydra configs live in
 `runs/config/`; entry points live in `runs/`.
 DiskTracker and ClearML are available, with DiskTracker selected by default.
 
-The research protocol and decisions are in [codex_plan.md](../codex_plan.md).
-Beauty 2014 is the first dataset for the cleaning and audit stage. Sequence
-lengths and Amazon temporal boundaries remain undecided; model and splitting
-code still use the baseline protocol.
+The research plan is in [codex_plan.md](../codex_plan.md); the implemented split
+is described in [codex_splitting_pipeline.md](codex_splitting_pipeline.md).
+The split and embedding launchers cover Beauty2023 and Yambda500m.
 
 ## Environment and entry points
 
 Use the existing Python 3.11 environment from this project root:
 
 ```bash
-source ../../sem_venv_311_av/bin/activate
+export PYTHON_BIN="/home/jovyan/shares/SR003.nfs2/volodkevich/25_10_semantic/sem_venv_311_av/bin/python"
 export PYTHONPATH=.
 export SEQ_REC_DATA_PATH=/path/to/your/data
 ```
@@ -37,15 +36,15 @@ the versions used for validation; no packages are installed by the tests.
 Inspect a resolved config without training:
 
 ```bash
-python -B runs/quantize_and_train.py --cfg job --resolve dataset=Beauty2014
-python -B runs/quantize_and_train.py --cfg job --resolve dataset=Beauty2014 recipe=SASRec
+"$PYTHON_BIN" -B runs/quantize_and_train.py --cfg job --resolve dataset=Beauty2014
+"$PYTHON_BIN" -B runs/quantize_and_train.py --cfg job --resolve dataset=Beauty2014 recipe=SASRec
 ```
 
 Select the recipe using the same entry point, after preparing the chosen split:
 
 ```bash
-python -B runs/quantize_and_train.py dataset=Beauty2014 recipe=GPTRec_SID
-python -B runs/quantize_and_train.py dataset=Beauty2014 recipe=SASRec
+"$PYTHON_BIN" -B runs/quantize_and_train.py dataset=Beauty2014 recipe=GPTRec_SID
+"$PYTHON_BIN" -B runs/quantize_and_train.py dataset=Beauty2014 recipe=SASRec
 ```
 
 Both commands use the dataset and trainer settings in the shared configuration,
@@ -71,15 +70,15 @@ source Git history are included.
 
 - Dataset names and numerical settings describe the source SID pipeline; they
   are not finalized settings for the cold-input study.
-- Training suffixes are chosen during dataset access, after the split vocabulary
-  has been defined. Fixed suffixes therefore do not yet define item warmth.
-- Cold-only histories are removed by source split alignment. Cold-input
-  reconstruction and the additional evaluation group are not implemented.
+- Temporal splitting fixes training suffixes before defining seen items and
+  saves three input variants with shared targets and history statistics.
+- Model-specific representations of unseen inputs remain open. Constructing
+  a retained input does not make every model capable of representing its items.
 - Validation users are sampled when dataloaders are constructed. A saved shared
   validation sample is not implemented.
 - SID evaluation does not apply `filter_seen`; SASRec applies it when enabled.
-- Training-exposure diagnostics use the source definitions, which differ from
-  the study's selected-training-event definition of unseen items.
+- Model-training exposure logs retain the source definitions. The split audit
+  separately counts selected training events and distinct training users per item.
 - Sequential assignment preserves insertion order. Stable extension of a fitted
   SID mapping to later cold items is not implemented.
 
@@ -91,15 +90,22 @@ and Yambda 500M. Set its environment variables, then copy individual commands
 or run the script from the project root. Inspect Beauty 2014 without running it:
 
 ```bash
-python -B runs/preprocess.py dataset=Beauty2014 dataset.name=Beauty2014 --cfg job --resolve
+"$PYTHON_BIN" -B runs/preprocess.py dataset=Beauty2014 dataset.name=Beauty2014 --cfg job --resolve
 ```
 
-Main preprocessing has no user/item frequency filter, user sampling, or sequence
-truncation. Amazon has no rating threshold; Yambda uses `played_ratio_pct >= 50`,
+Main preprocessing enables iterative user/item 5-core filtering
+(`n_core_filtering: true`, `user_min_count: 5`, `item_min_count: 5`), with no user
+sampling or sequence truncation. Amazon has no rating threshold; Yambda uses `played_ratio_pct >= 50`,
 with the final 30-day window applied first for 500M. Exact source-record duplicates
 keep their last occurrence. Stable ordering preserves timestamp ties, and
-consecutive same-item runs keep their first event. Existing filter helpers perform
-these operations; `dataset_stats` supplies the audit.
+consecutive same-item runs keep their first event. Then 5-core filtering removes
+users and items with fewer than five retained events, repeating consecutive-repeat
+removal and count filtering until stable. Counts cover the whole cleaned dataset
+window before splitting and count events, not distinct user-item pairs. Five
+global events do not imply five training events or training-warm membership.
+Existing filter helpers perform these operations; `dataset_stats` supplies the audit.
+User minimum count 5 with no item-frequency filter is an alternative, not the
+current preprocessing setting.
 
 Raw interactions and optional metadata are read from `SEQ_REC_DATA_PATH/raw/`.
 Output uses `preprocessed/<dataset>_cold_inputs/`: interactions, optional metadata,
@@ -112,18 +118,93 @@ Beauty 2023 and defaults to `s` elsewhere. Day-window filters and day-range
 statistics respect this setting; saved timestamps retain their original values.
 Splitting and training remain separate.
 
+## Cold-input splitting
+
+The [preprocessing experiment](experiments/2026-09-20_preprocessing/README.md)
+contains the generated CSV and Markdown summary of all six datasets. Experiments
+follow the dated layout and are excluded from Git; see the
+[experiment index](experiments/README.md).
+
+The study focuses on Beauty 2023 and Yambda 500M. Primary input comparisons require
+targets with all three variants available; exclusions are reported separately.
+The [consolidated audit](experiments/2026-09-20_preprocessing/findings/codex_split_variants_audit.md)
+includes cropped-training frequency histograms, matched-input bar plots, and
+catalogue activity/stability plots over the full cleaned timelines.
+
+`GlobalTimeSplitter` uses temporal validation only, with required
+`time_threshold`, `val_time_threshold`, and `train_max_events` parameters.
+`remove_unseen_targets=true` selects the last training-seen holdout event;
+`remove_unseen_users=false` retains users outside the cropped training-user set
+subject to the inherited temporal eligibility. `LeaveOneOutSplitter` remains
+available through `splitting_strategy=loo`.
+
+`gts.yaml` is the default splitting config. Both time thresholds default to `0.9`;
+`splitting_strategy.train_max_events` defaults to `${dataset.seq_length_items}`.
+The dataset configs set this length to 20 for Beauty and 100 for Yambda;
+Sports2014 and Toys2014 retain their baseline length of 16.
+
+`sh/prepare_data.sh` cleans all six datasets. `sh/split.sh` reads only the two
+selected `_cold_inputs` datasets; `sh/generate_embeddings.sh` uses the same names
+and split directories in a separate step. Each launcher exports an absolute
+`PYTHON_BIN` path. Inspect both split configs with `bash sh/split.sh --cfg job --resolve`.
+
+| Dataset | Training / input limit | Test / validation threshold | Split name |
+|---|---|---|---|
+| Beauty2023 | 20 / 19 | 0.9 / 0.9, nested timestamp quantiles | `gts_q09_val_by_time` |
+| Yambda500m, final 30 days | 100 / 99 | 25913600 / 25827200, seconds | `gts_1d_val_by_time` |
+
+GTS saves retain, remove-then-crop, and crop-then-remove inputs, alongside
+separate validation/test targets. Targets include original-history frequency
+histograms and each variant's statistics and availability. Empty variants are
+excluded from model evaluation without deleting shared targets. Select inputs
+with `input_variant=retain`, `remove_then_crop` (default), or `crop_then_remove`.
+LOO also saves separate validation inputs and targets. Use
+`splitting_strategy=loo split_name=loo` for a separate LOO destination.
+
+The splitter has no rare threshold. Exact item counts and per-target histograms
+support later rarity analysis, including the audit's thresholds 1 through 5.
+Dataset/model length settings must accommodate the saved sequences; the loader
+rejects additional truncation or `train_last_days` changes to a temporal split.
+See the [pipeline description](codex_splitting_pipeline.md) and
+[figure prompt](codex_splitting_figure_prompt.md).
+
+Terminal output reports event, user, and item totals per subset. Detailed counts
+are saved as `seq_len_distribution.csv`, `item_occurrence_distribution.csv`, and
+`frequency_histogram.csv` (GTS training-item frequencies), each with a `subset`
+column. `statistics.json` holds scalar summaries and resolved protocol settings.
+Per-target history histograms remain in the target Parquet files.
+
+The loader aligns each selected variant with its available targets. Enforcing the
+all-three-available population across model runs and saving one shared validation
+sample (cap 20,000, dedicated seed) remain evaluation work. Unseen-input
+representations and output-catalog scope also remain open. The audit and
+`runs/split.py` refuse existing outputs; combined-validation artifacts require a
+new split name for the separate-target loader.
+
 ## Validation
 
 Run the preprocessing regression checks with synthetic data on CPU:
 
 ```bash
-PYTHONPATH=. ../../sem_venv_311_av/bin/python -B codex_tests/codex_check_preprocessing.py
+PYTHONPATH=. "$PYTHON_BIN" -B codex_tests/codex_check_preprocessing.py
 ```
 
 These cover Pandas/Polars agreement, source-record identity, ordering, repeats,
 singletons, inclusive window boundaries, relevance filtering, empty results,
 missing fields, saved audits, and overwrite protection. Temporary fixtures stay
 inside `codex_validation/` and are removed after the checks.
+
+Check the temporal splitter extension and LOO on CPU:
+
+```bash
+PYTHONPATH=. "$PYTHON_BIN" -B codex_tests/codex_check_splits.py
+CUDA_VISIBLE_DEVICES='' PYTHONPATH=. "$PYTHON_BIN" -B codex_tests/codex_check_split_pipeline.py
+```
+
+These checks cover fixed training membership, temporal eligibility, tied target
+identity, three variants, empty histories, deferred rarity, Parquet roundtrips,
+CSV count consistency, overwrite protection, explicit-target dataset parity, per-user metric
+aggregation, GTS/LOO baseline parity, and split configs.
 
 Run the approved CPU checks from this directory:
 

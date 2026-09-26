@@ -5,6 +5,7 @@ __pycache__/
 .ipynb_checkpoints/
 
 # experiment outputs (results live on the ClearML server)
+/experiments/
 checkpoints/
 model_checkpoints/
 lightning_logs/

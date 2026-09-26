@@ -5,6 +5,7 @@ import os
 import pickle
 
 import hydra
+import pandas as pd
 from omegaconf import DictConfig, OmegaConf, open_dict
 
 from src.preprocess.indexes import encode
@@ -68,8 +69,9 @@ def main(config: DictConfig) -> None:
             }
             continue
         split_stats[dataset] = dataset_stats(split[dataset], extended=True, timestamp_unit=timestamp_unit)
-        print(f"{dataset} statistics")
-        print(split_stats[dataset])
+        stats = split_stats[dataset]
+        print(f"{dataset}: {stats['n_interactions']:,} events, "
+              f"{stats['n_users']:,} users, {stats['n_items']:,} items")
 
     split_stats["protocol"] = getattr(splitting_strategy, "statistics", {})
     os.makedirs(output_dir, exist_ok=False)
@@ -85,6 +87,12 @@ def main(config: DictConfig) -> None:
     for dataset in split:
         split[dataset].to_parquet(os.path.join(output_dir, f'{dataset}.parquet'), index=False)
     # save stats
+    for key in ("seq_len_distribution", "item_occurrence_distribution", "frequency_histogram"):
+        distributions = [pd.DataFrame(stats.pop(key)).assign(subset=subset)
+                         for subset, stats in split_stats.items() if key in stats]
+        if distributions:
+            pd.concat(distributions, ignore_index=True).to_csv(
+                os.path.join(output_dir, f"{key}.csv"), index=False)
     with open(os.path.join(output_dir, "statistics.json"), mode="w", encoding="utf-8") as file:
         json.dump(split_stats, file, indent=2, default=str)
 
